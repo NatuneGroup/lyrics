@@ -7,6 +7,7 @@
 
 package moe.rukamori.archivetune.unison
 
+import java.io.IOException
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -38,7 +39,10 @@ object Unison {
         }
     }
 
-    private val client by lazy {
+    internal var clientForTests: HttpClient? = null
+    private val client: HttpClient get() = clientForTests ?: defaultClient
+
+    private val defaultClient by lazy {
         HttpClient(OkHttp) {
             install(ContentNegotiation) {
                 json(jsonFormat)
@@ -87,6 +91,9 @@ object Unison {
                     parameter("v", videoId)
                 }
             logger?.invoke("Unison videoId response status: ${response.status}")
+            if (response.status.value == 429 || response.status.value in 500..599) {
+                throw IOException("Unison HTTP ${response.status.value}")
+            }
             if (!response.status.isSuccess()) return null
             val body = response.bodyAsText()
             logger?.invoke("Unison videoId raw response: ${body.take(MAX_LOG_BODY_LENGTH)}")
@@ -96,6 +103,7 @@ object Unison {
             throw e
         } catch (e: Exception) {
             logger?.invoke("Unison videoId fetch error: ${e.message}")
+            if (e is IOException) throw e
             null
         }
     }
@@ -104,6 +112,9 @@ object Unison {
         return try {
             val response = client.get("lyrics/$id")
             logger?.invoke("Unison ID response status: ${response.status}")
+            if (response.status.value == 429 || response.status.value in 500..599) {
+                throw IOException("Unison HTTP ${response.status.value}")
+            }
             if (!response.status.isSuccess()) return null
             val body = response.bodyAsText()
             logger?.invoke("Unison ID raw response: ${body.take(MAX_LOG_BODY_LENGTH)}")
@@ -113,6 +124,7 @@ object Unison {
             throw e
         } catch (e: Exception) {
             logger?.invoke("Unison ID fetch error: ${e.message}")
+            if (e is IOException) throw e
             null
         }
     }
@@ -121,6 +133,9 @@ object Unison {
         return try {
             val response = client.get("lyrics/variants/$videoId")
             logger?.invoke("Unison variants response status: ${response.status}")
+            if (response.status.value == 429 || response.status.value in 500..599) {
+                throw IOException("Unison HTTP ${response.status.value}")
+            }
             if (!response.status.isSuccess()) return emptyList()
             val body = response.bodyAsText()
             logger?.invoke("Unison variants raw response: ${body.take(MAX_LOG_BODY_LENGTH)}")
@@ -137,6 +152,7 @@ object Unison {
             throw e
         } catch (e: Exception) {
             logger?.invoke("Unison variants fetch error: ${e.message}")
+            if (e is IOException) throw e
             emptyList()
         }
     }
@@ -162,6 +178,9 @@ object Unison {
                     parameter("limit", MAX_SEARCH_RESULTS)
                 }
             logger?.invoke("Unison search response status: ${response.status}")
+            if (response.status.value == 429 || response.status.value in 500..599) {
+                throw IOException("Unison HTTP ${response.status.value}")
+            }
             if (!response.status.isSuccess()) return emptyList()
             val body = response.bodyAsText()
             logger?.invoke("Unison search raw response: ${body.take(MAX_LOG_BODY_LENGTH)}")
@@ -182,6 +201,7 @@ object Unison {
             throw e
         } catch (e: Exception) {
             logger?.invoke("Unison search fetch error: ${e.message}")
+            if (e is IOException) throw e
             emptyList()
         }
     }
@@ -212,22 +232,29 @@ object Unison {
         artist: String,
         album: String? = null,
         durationSeconds: Int = -1,
+        onFailure: (Throwable) -> Unit = {},
         callback: (String) -> Unit,
     ) {
-        var results = searchEntries(title, artist, album, durationSeconds)
-        if (results.isEmpty()) {
-            val cleanVideoId = videoId?.trim()?.takeIf { it.isNotEmpty() }
-            if (cleanVideoId != null) {
-                results = fetchVariants(cleanVideoId)
-                if (results.isEmpty()) {
-                    results = listOfNotNull(fetchByVideoId(cleanVideoId))
+        try {
+            var results = searchEntries(title, artist, album, durationSeconds)
+            if (results.isEmpty()) {
+                val cleanVideoId = videoId?.trim()?.takeIf { it.isNotEmpty() }
+                if (cleanVideoId != null) {
+                    results = fetchVariants(cleanVideoId)
+                    if (results.isEmpty()) {
+                        results = listOfNotNull(fetchByVideoId(cleanVideoId))
+                    }
                 }
             }
-        }
-        results.take(MAX_SEARCH_RESULTS).forEachIndexed { index, entry ->
-            currentCoroutineContext().ensureActive()
-            logger?.invoke("Unison search result ${index + 1}: format=${entry.format}, syncType=${entry.syncType}")
-            callback(entry.lyrics)
+            results.take(MAX_SEARCH_RESULTS).forEachIndexed { index, entry ->
+                currentCoroutineContext().ensureActive()
+                logger?.invoke("Unison search result ${index + 1}: format=${entry.format}, syncType=${entry.syncType}")
+                callback(entry.lyrics)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            onFailure(error)
         }
     }
 }
