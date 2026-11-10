@@ -7,6 +7,7 @@
 
 package moe.rukamori.archivetune.paxsenix
 
+import java.io.IOException
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
@@ -68,6 +69,10 @@ object PaxsenixLyrics {
     // parallel, and the contention + allocation churn was a measurable source
     // of GC pressure and UI jank.
     var logger: ((String) -> Unit)? = null
+
+    private fun ensureNotTransient(status: Int) {
+        if (status == 429 || status in 500..599) throw IOException("Paxsenix HTTP $status")
+    }
 
     private fun log(message: String) {
         logger?.invoke(message)
@@ -138,7 +143,9 @@ object PaxsenixLyrics {
 
     private val ampTokenRefreshMutex = Mutex()
 
-    private val tokenClient by lazy {
+    private val tokenClient: HttpClient get() = clientForTests ?: defaultTokenClient
+
+    private val defaultTokenClient by lazy {
         HttpClient(OkHttp) {
             install(HttpTimeout) {
                 requestTimeoutMillis = 10_000
@@ -209,6 +216,7 @@ object PaxsenixLyrics {
         runSuspendCatching {
             // Step 1: fetch the music.apple.com landing page to discover the JS bundle URL.
             val homeResponse = tokenClient.get(APPLE_MUSIC_WEB_HOME)
+            ensureNotTransient(homeResponse.status.value)
             if (homeResponse.status != HttpStatusCode.OK) {
                 log("Apple Music home fetch failed: ${homeResponse.status}")
                 return@runSuspendCatching null
@@ -235,6 +243,7 @@ object PaxsenixLyrics {
 
             // Step 2: fetch the JS bundle and extract the JWT.
             val jsResponse = tokenClient.get(jsBundleUrl)
+            ensureNotTransient(jsResponse.status.value)
             if (jsResponse.status != HttpStatusCode.OK) {
                 log("AMP token: JS bundle fetch failed: ${jsResponse.status}")
                 return@runSuspendCatching null
@@ -246,6 +255,7 @@ object PaxsenixLyrics {
         }.onFailure { e ->
             if (e is CancellationException) throw e
             log("AMP token scrape error: ${e.message}")
+            if (e is IOException) throw e
         }.getOrNull()
 
     // Apple Music web player JWTs are ES256-signed with 3 base64url segments
@@ -306,7 +316,10 @@ object PaxsenixLyrics {
             explicitNulls = false
         }
 
-    private val client by lazy {
+    internal var clientForTests: HttpClient? = null
+    private val client: HttpClient get() = clientForTests ?: defaultClient
+
+    private val defaultClient by lazy {
         HttpClient(OkHttp) {
             install(ContentNegotiation) {
                 json(json)
@@ -484,6 +497,7 @@ object PaxsenixLyrics {
                             parameter("types", "songs")
                             parameter("limit", "10")
                         }
+                    ensureNotTransient(retryResponse.status.value)
                     if (retryResponse.status != HttpStatusCode.OK) {
                         log("AMP search retry failed with status: ${retryResponse.status}")
                         return@runSuspendCatching null
@@ -494,6 +508,7 @@ object PaxsenixLyrics {
                 return@runSuspendCatching null
             }
 
+            ensureNotTransient(response.status.value)
             if (response.status != HttpStatusCode.OK) {
                 log("AMP search failed with status: ${response.status}")
                 return@runSuspendCatching null
@@ -503,6 +518,7 @@ object PaxsenixLyrics {
         }.onFailure { e ->
             if (e is CancellationException) throw e
             log("AMP search error: ${e.message}")
+            if (e is IOException) throw e
         }.getOrNull()
     }
 
@@ -596,6 +612,7 @@ object PaxsenixLyrics {
                 }
 
             log("Apple Music lyrics (TTML) status: ${lyricsResponse.status}")
+            ensureNotTransient(lyricsResponse.status.value)
             if (lyricsResponse.status == HttpStatusCode.OK) {
                 try {
                     val rawBody = lyricsResponse.body<String>().trim()
@@ -613,6 +630,10 @@ object PaxsenixLyrics {
                     } else {
                         log("Apple Music TTML content was null or invalid. Type: ${data["type"]}")
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: IOException) {
+                    throw e
                 } catch (e: Exception) {
                     log("Error parsing Apple Music TTML: ${e.message}")
                 }
@@ -623,6 +644,7 @@ object PaxsenixLyrics {
                     parameter("id", songId)
                 }
             log("Apple Music lyrics (JSON) status: ${jsonResponse.status}")
+            ensureNotTransient(jsonResponse.status.value)
             if (jsonResponse.status == HttpStatusCode.OK) {
                 val lyricsData = jsonResponse.body<AppleMusicLyricsResponse>()
                 if (lyricsData.content.isNotEmpty()) {
@@ -647,6 +669,7 @@ object PaxsenixLyrics {
                     parameter("q", query)
                 }
 
+            ensureNotTransient(neteaseSearch.status.value)
             if (neteaseSearch.status == HttpStatusCode.OK) {
                 val searchResponse = neteaseSearch.body<NeteaseSearchResponse>()
                 val songs = searchResponse.result?.songs ?: emptyList()
@@ -669,6 +692,7 @@ object PaxsenixLyrics {
                             }
 
                         log("NetEase lyrics status: ${lyricsResponse.status}")
+                        ensureNotTransient(lyricsResponse.status.value)
                         if (lyricsResponse.status == HttpStatusCode.OK) {
                             val lyricsData = lyricsResponse.body<JsonObject>()
 
@@ -714,6 +738,7 @@ object PaxsenixLyrics {
                 client.get("spotify/search") {
                     parameter("q", query)
                 }
+            ensureNotTransient(spotifySearch.status.value)
             if (spotifySearch.status == HttpStatusCode.OK) {
                 val items = spotifySearch.body<List<PaxsenixSearchItem>>()
                 val bestMatch =
@@ -732,6 +757,7 @@ object PaxsenixLyrics {
                                 parameter("id", bestMatch.realId)
                             }
                         log("Spotify lyrics status: ${lyricsResponse.status}")
+                        ensureNotTransient(lyricsResponse.status.value)
                         if (lyricsResponse.status == HttpStatusCode.OK) {
                             val data = cleanJsonLyrics(lyricsResponse.body<String>())
                             if (data != null) {
@@ -759,6 +785,7 @@ object PaxsenixLyrics {
                 client.get("youtube/search") {
                     parameter("q", query)
                 }
+            ensureNotTransient(searchResponse.status.value)
             if (searchResponse.status != HttpStatusCode.OK) {
                 log("YouTube search failed with status: ${searchResponse.status}")
                 throw IllegalStateException("YouTube lyrics unavailable")
@@ -781,6 +808,7 @@ object PaxsenixLyrics {
                             parameter("id", bestMatch.realId)
                         }
                     log("YouTube lyrics status: ${lyricsResponse.status}")
+                    ensureNotTransient(lyricsResponse.status.value)
                     if (lyricsResponse.status == HttpStatusCode.OK) {
                         val data = cleanJsonLyrics(lyricsResponse.body<String>())
                         if (data != null) {
@@ -812,6 +840,7 @@ object PaxsenixLyrics {
                     parameter("d", durationSeconds.toString())
                     parameter("type", "word")
                 }
+            ensureNotTransient(mxmWord.status.value)
             if (mxmWord.status == HttpStatusCode.OK) {
                 val data = cleanJsonLyrics(mxmWord.body<String>())
                 if (data != null) {
@@ -830,6 +859,7 @@ object PaxsenixLyrics {
                     parameter("d", durationSeconds.toString())
                 }
             log("Musixmatch lyrics status: ${mxmLyrics.status}")
+            ensureNotTransient(mxmLyrics.status.value)
             if (mxmLyrics.status == HttpStatusCode.OK) {
                 val data = cleanJsonLyrics(mxmLyrics.body<String>())
                 if (data != null) {
