@@ -7,6 +7,7 @@
 
 package moe.rukamori.archivetune.betterlyrics
 
+import java.io.IOException
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -35,7 +36,10 @@ object BetterLyrics {
         }
     }
 
-    private val client by lazy {
+    internal var clientForTests: HttpClient? = null
+    private val client: HttpClient get() = clientForTests ?: defaultClient
+
+    private val defaultClient by lazy {
         HttpClient(OkHttp) {
             install(ContentNegotiation) {
                 json(jsonFormat)
@@ -71,18 +75,24 @@ object BetterLyrics {
 
         if (cleanTitle.isBlank() || cleanArtist.isBlank()) return null
 
+        var failure: IOException? = null
         for (endpoint in endpoints) {
-            fetchLyricsFromEndpoint(
-                endpoint = endpoint,
-                title = cleanTitle,
-                artist = cleanArtist,
-                album = cleanAlbum,
-                durationSeconds = durationSeconds,
-            )?.let { lyrics ->
-                return lyrics
+            try {
+                fetchLyricsFromEndpoint(
+                    endpoint = endpoint,
+                    title = cleanTitle,
+                    artist = cleanArtist,
+                    album = cleanAlbum,
+                    durationSeconds = durationSeconds,
+                )?.let { lyrics ->
+                    return lyrics
+                }
+            } catch (error: IOException) {
+                failure = error
             }
         }
 
+        failure?.let { throw it }
         return null
     }
 
@@ -107,6 +117,9 @@ object BetterLyrics {
             logger?.invoke("$endpoint response status: ${response.status}")
 
             val responseText = response.bodyAsText()
+            if (response.status.value == 429 || response.status.value in 500..599) {
+                throw IOException("BetterLyrics $endpoint HTTP ${response.status.value}")
+            }
             if (!response.status.isSuccess()) {
                 logger?.invoke("$endpoint request failed with status: ${response.status}")
                 return null
@@ -115,6 +128,8 @@ object BetterLyrics {
             val lyrics =
                 try {
                     decodeLyrics(responseText)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     logger?.invoke("$endpoint parse error: ${e.message}")
                     ""
@@ -126,6 +141,7 @@ object BetterLyrics {
             throw e
         } catch (e: Exception) {
             logger?.invoke("$endpoint error fetching lyrics: ${e.stackTraceToString()}")
+            if (e is IOException) throw e
             null
         }
     }
