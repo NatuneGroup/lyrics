@@ -7,6 +7,7 @@
 
 package moe.rukamori.archivetune.youlyplus
 
+import java.io.IOException
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -71,7 +72,10 @@ object YouLyPlus {
         }
     }
 
-    private val client by lazy {
+    internal var clientForTests: HttpClient? = null
+    private val client: HttpClient get() = clientForTests ?: defaultClient
+
+    private val defaultClient by lazy {
         HttpClient(OkHttp) {
             install(HttpTimeout) {
                 requestTimeoutMillis = 20000
@@ -105,10 +109,18 @@ object YouLyPlus {
         }
 
         return try {
+            var failure: IOException? = null
+            suspend fun attempt(fetch: suspend () -> String?): String? =
+                try {
+                    fetch()
+                } catch (error: IOException) {
+                    failure = error
+                    null
+                }
             val lyrics =
-                fetchTtml(cleanTitle, cleanArtist, cleanAlbum, durationSeconds)
-                    ?: fetchLyricsAsLrc(cleanTitle, cleanArtist, cleanAlbum, durationSeconds)
-                    ?: throw IllegalStateException("Lyrics unavailable")
+                attempt { fetchTtml(cleanTitle, cleanArtist, cleanAlbum, durationSeconds) }
+                    ?: attempt { fetchLyricsAsLrc(cleanTitle, cleanArtist, cleanAlbum, durationSeconds) }
+                    ?: throw (failure ?: IllegalStateException("Lyrics unavailable"))
             Result.success(lyrics)
         } catch (e: CancellationException) {
             throw e
@@ -165,6 +177,7 @@ object YouLyPlus {
         durationSeconds: Int,
         decode: (String) -> String?,
     ): String? {
+        var failure: IOException? = null
         for (baseUrl in baseUrls) {
             currentCoroutineContext().ensureActive()
             val endpoint = baseUrl + path
@@ -181,6 +194,9 @@ object YouLyPlus {
                 val body = response.bodyAsText()
                 logger?.invoke("YouLyPlus $path response status: ${response.status}")
 
+                if (response.status.value == 429 || response.status.value in 500..599) {
+                    throw IOException("YouLyPlus $path HTTP ${response.status.value}")
+                }
                 if (!response.status.isSuccess()) {
                     continue
                 }
@@ -194,9 +210,11 @@ object YouLyPlus {
                 throw e
             } catch (e: Exception) {
                 logger?.invoke("YouLyPlus $path fetch error from $baseUrl: ${e.message}")
+                if (e is IOException) failure = e
             }
         }
 
+        failure?.let { throw it }
         return null
     }
 
