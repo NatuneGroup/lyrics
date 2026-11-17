@@ -26,6 +26,18 @@ class YouLyPlusFailureTest {
     }
 
     @Test
+    fun aRateLimitParksTheProviderAsAnOutage() = runBlocking {
+        var requests = 0
+        withResponse(responseForPath = { requests++; 429 to "" }) {
+            assertTrue(YouLyPlus.getLyrics("Track", "Artist").exceptionOrNull() is IOException)
+            val afterFirst = requests
+            val second = YouLyPlus.getLyrics("Track", "Artist").exceptionOrNull()
+            assertTrue(second is IOException)
+            assertEquals(afterFirst, requests)
+        }
+    }
+
+    @Test
     fun theLrcFallbackCanRecoverFromATtmlOutage() = runBlocking {
         withResponse(responseForPath = { path ->
             if (path.contains("ttml")) 503 to "" else 200 to """{"type":"Line","lyrics":[{"time":1000,"text":"Hello"}]}"""

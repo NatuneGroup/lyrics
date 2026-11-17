@@ -73,7 +73,12 @@ object YouLyPlus {
         }
     }
 
+    // Swapping the client starts from a clean cooldown, so one test's 429 cannot park the next.
     internal var clientForTests: HttpClient? = null
+        set(value) {
+            field = value
+            rateLimitedUntilMs = 0L
+        }
     private val client: HttpClient get() = clientForTests ?: defaultClient
 
     private val defaultClient by lazy {
