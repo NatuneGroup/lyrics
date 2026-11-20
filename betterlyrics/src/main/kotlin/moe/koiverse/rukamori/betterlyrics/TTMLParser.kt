@@ -13,6 +13,7 @@ import org.w3c.dom.Node
 import org.xml.sax.InputSource
 import org.xml.sax.SAXException
 import java.io.StringReader
+import java.lang.Character.UnicodeScript
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 import javax.xml.parsers.ParserConfigurationException
@@ -107,7 +108,10 @@ object TTMLParser {
         fun appendInterSpanText(value: String) {
             val content =
                 if (value.contains('\n') || value.contains('\r')) {
-                    value.trim().takeIf(String::isNotEmpty) ?: return
+                    // Pretty-printed layout between spans: a word separator only for scripts that
+                    // space their words (Latin, Hangul, …); CJK indentation stays inert.
+                    value.trim().takeIf(String::isNotEmpty)
+                        ?: (" ".takeIf { segments.any { TTMLParser.usesWordSpacing(it.text) } } ?: return)
                 } else {
                     value.takeIf(String::isNotEmpty) ?: return
                 }
@@ -185,29 +189,8 @@ object TTMLParser {
             ?.lines
             .orEmpty()
             .map { line ->
-                val mainWords =
-                    line.main.segments.mapNotNull { segment ->
-                        segment.timing?.let { timing ->
-                            ParsedWord(
-                                text = segment.text,
-                                startTime = timing.startMs / MILLIS_PER_SECOND,
-                                endTime = timing.endMs / MILLIS_PER_SECOND,
-                            )
-                        }
-                    }
-                val backgroundWords =
-                    line.backgrounds.flatMap { track ->
-                        track.segments.mapNotNull { segment ->
-                            segment.timing?.let { timing ->
-                                ParsedWord(
-                                    text = segment.text,
-                                    startTime = timing.startMs / MILLIS_PER_SECOND,
-                                    endTime = timing.endMs / MILLIS_PER_SECOND,
-                                    isBackground = true,
-                                )
-                            }
-                        }
-                    }
+                val mainWords = spacedWords(line.main.segments, isBackground = false)
+                val backgroundWords = line.backgrounds.flatMap { track -> spacedWords(track.segments, isBackground = true) }
                 val romanization = chooseRomanization(line.romanizations)
 
                 ParsedLine(
@@ -815,6 +798,49 @@ object TTMLParser {
     private fun chooseRomanization(tracks: List<TtmlTrack>): TtmlTrack? =
         tracks.firstOrNull { it.language?.contains("Latn", ignoreCase = true) == true }
             ?: tracks.firstOrNull()
+
+    // Word-level renderers lay words out verbatim, so each word keeps one trailing separator
+    // space: a leading space folds onto the previous word, a whitespace-only span is a pure
+    // separator, runs collapse to one space, and the line's final word carries none.
+    private fun spacedWords(
+        segments: List<TtmlSegment>,
+        isBackground: Boolean,
+    ): List<ParsedWord> {
+        val words = mutableListOf<ParsedWord>()
+        fun separate() {
+            val last = words.lastOrNull() ?: return
+            if (!last.text.endsWith(" ")) words[words.lastIndex] = last.copy(text = "${last.text} ")
+        }
+        for (segment in segments) {
+            val normalized = segment.text.replace(WHITESPACE_REGEX, " ")
+            val core = normalized.trim()
+            val timing = segment.timing
+            if (core.isEmpty() || timing == null) {
+                if (core.isEmpty()) separate()
+                continue
+            }
+            if (normalized.startsWith(" ")) separate()
+            words +=
+                ParsedWord(
+                    text = if (normalized.endsWith(" ")) "$core " else core,
+                    startTime = timing.startMs / MILLIS_PER_SECOND,
+                    endTime = timing.endMs / MILLIS_PER_SECOND,
+                    isBackground = isBackground,
+                )
+        }
+        words.lastOrNull()?.let { last -> words[words.lastIndex] = last.copy(text = last.text.trimEnd()) }
+        return words
+    }
+
+    private fun usesWordSpacing(text: String): Boolean =
+        text.any { ch -> Character.isLetter(ch) && UnicodeScript.of(ch.code) in SPACE_USING_SCRIPTS }
+
+    private val SPACE_USING_SCRIPTS =
+        setOf(
+            UnicodeScript.LATIN, UnicodeScript.CYRILLIC, UnicodeScript.GREEK, UnicodeScript.HANGUL,
+            UnicodeScript.ARABIC, UnicodeScript.HEBREW, UnicodeScript.DEVANAGARI, UnicodeScript.GEORGIAN,
+            UnicodeScript.ARMENIAN, UnicodeScript.ETHIOPIC,
+        )
 
     private fun String.normalizedText(): String = replace(WHITESPACE_REGEX, " ").trim()
 
