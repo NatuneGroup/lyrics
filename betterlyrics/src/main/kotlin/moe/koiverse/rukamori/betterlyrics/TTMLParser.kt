@@ -198,7 +198,9 @@ object TTMLParser {
                     startTime = line.timing.startMs / MILLIS_PER_SECOND,
                     endTime = line.timing.endMs / MILLIS_PER_SECOND,
                     words = mainWords + backgroundWords,
-                    agent = line.agent?.id,
+                    // Every agent id on the line, space-separated like the ttm:agent attribute, so callers can tell a duet
+                    // or group line from a single voice.
+                    agent = line.agents.joinToString(" ") { it.id }.ifEmpty { null },
                     providerRomanizedText = romanization?.text?.normalizedText(),
                     providerRomanizedWords =
                         romanization
