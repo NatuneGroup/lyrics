@@ -31,6 +31,8 @@ object TTMLParser {
         val providerRomanizedWords: List<String>? = null,
         val providerRomanizedLanguage: String? = null,
         val providerTranslationText: String? = null,
+        /** Display names of the line's declared singers, in declaration order; empty when the TTML names none. */
+        val agentNames: List<String> = emptyList(),
     )
 
     data class ParsedWord(
@@ -210,6 +212,7 @@ object TTMLParser {
                             ?.takeIf { words -> words.isNotEmpty() },
                     providerRomanizedLanguage = romanization?.language,
                     providerTranslationText = line.translations.firstOrNull()?.text?.normalizedText(),
+                    agentNames = line.agents.mapNotNull(TtmlAgent::name).distinct(),
                 )
             }
 
